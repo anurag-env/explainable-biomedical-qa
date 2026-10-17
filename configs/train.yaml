@@ -7,7 +7,7 @@ stages:
     name: "PubMedQA Pretraining"
     dataset: "pubmedqa"
     epochs: 10
-    batch_size: 2
+    batch_size: 16
     learning_rate: 2e-5
     warmup_ratio: 0.1
     save_steps: 1000
@@ -18,7 +18,7 @@ stages:
     name: "MedQA Fine-tuning"
     dataset: "medqa"
     epochs: 15
-    batch_size: 2
+    batch_size: 16
     learning_rate: 1e-5
     warmup_ratio: 0.1
     save_steps: 500
@@ -30,7 +30,7 @@ stages:
     name: "HealthSearchQA Fine-tuning"
     dataset: "healthsearchqa"
     epochs: 20
-    batch_size: 2
+    batch_size: 16
     learning_rate: 5e-6
     warmup_ratio: 0.15
     save_steps: 200
@@ -42,7 +42,7 @@ stages:
     name: "Hindi Translation Fine-tuning"
     dataset: null  # Uses IndicTrans2 pretrained
     epochs: 5
-    batch_size: 2
+    batch_size: 16
     learning_rate: 1e-5
     checkpoint_dir: "outputs/checkpoints/stage4"
 
@@ -50,7 +50,7 @@ stages:
     name: "Voice Generation Training"
     dataset: null  # Uses TTS pretrained
     epochs: 5
-    batch_size: 2
+    batch_size: 16
     learning_rate: 1e-4
     checkpoint_dir: "outputs/checkpoints/stage5"
 
