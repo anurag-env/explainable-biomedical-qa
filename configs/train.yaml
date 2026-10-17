@@ -1,0 +1,121 @@
+# Training Configuration
+# ----------------------
+
+# Staged training curriculum
+stages:
+  1:
+    name: "PubMedQA Pretraining"
+    dataset: "pubmedqa"
+    epochs: 10
+    batch_size: 2
+    learning_rate: 2e-5
+    warmup_ratio: 0.1
+    save_steps: 1000
+    eval_steps: 500
+    checkpoint_dir: "outputs/checkpoints/stage1"
+
+  2:
+    name: "MedQA Fine-tuning"
+    dataset: "medqa"
+    epochs: 15
+    batch_size: 2
+    learning_rate: 1e-5
+    warmup_ratio: 0.1
+    save_steps: 500
+    eval_steps: 250
+    checkpoint_dir: "outputs/checkpoints/stage2"
+    resume_from: "outputs/checkpoints/stage1/best"
+
+  3:
+    name: "HealthSearchQA Fine-tuning"
+    dataset: "healthsearchqa"
+    epochs: 20
+    batch_size: 2
+    learning_rate: 5e-6
+    warmup_ratio: 0.15
+    save_steps: 200
+    eval_steps: 100
+    checkpoint_dir: "outputs/checkpoints/stage3"
+    resume_from: "outputs/checkpoints/stage2/best"
+
+  4:
+    name: "Hindi Translation Fine-tuning"
+    dataset: null  # Uses IndicTrans2 pretrained
+    epochs: 5
+    batch_size: 2
+    learning_rate: 1e-5
+    checkpoint_dir: "outputs/checkpoints/stage4"
+
+  5:
+    name: "Voice Generation Training"
+    dataset: null  # Uses TTS pretrained
+    epochs: 5
+    batch_size: 2
+    learning_rate: 1e-4
+    checkpoint_dir: "outputs/checkpoints/stage5"
+
+# General training settings
+training:
+  seed: 42
+  fp16: true
+  gradient_accumulation_steps: 32
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+  optimizer: "adamw"
+  scheduler: "cosine_with_restarts"
+  early_stopping_patience: 5
+  log_dir: "outputs/logs"
+  device: "cuda"  # cuda, cpu, or auto
+
+# Optuna hyperparameter search
+optuna:
+  enabled: true
+  n_trials: 50
+  study_name: "rerb_qa_hparam_search"
+  storage: "sqlite:///outputs/optuna_study.db"
+  direction: "maximize"  # Maximize accuracy
+  search_space:
+    learning_rate:
+      type: "float"
+      low: 1e-5
+      high: 5e-5
+      log: true
+    batch_size:
+      type: "categorical"
+      choices: [8, 16, 32]
+    epochs:
+      type: "int"
+      low: 5
+      high: 30
+    max_length:
+      type: "categorical"
+      choices: [256, 512]
+    attention_heads:
+      type: "categorical"
+      choices: [8, 12, 16]
+    hidden_units:
+      type: "categorical"
+      choices: [768, 1024]
+    dropout:
+      type: "float"
+      low: 0.1
+      high: 0.5
+    weight_decay:
+      type: "float"
+      low: 0.01
+      high: 0.1
+      log: true
+    recursive_iterations:
+      type: "int"
+      low: 3
+      high: 10
+    optimizer:
+      type: "categorical"
+      choices: ["adamw", "ranger", "lion", "lookahead_adam"]
+
+# Loss weights
+loss:
+  lambda_qa: 1.0
+  lambda_translation: 0.3
+  lambda_explainability: 0.2
+  lambda_speech: 0.1

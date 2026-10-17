@@ -1,0 +1,220 @@
+"""
+RERBQAModel — Full assembled model.
+
+Pipeline:
+  Input Question
+  -> Biomedical Preprocessing
+  -> RoBERTa Biomedical Encoder
+  -> Multi-head Self-Attention
+  -> Recursive Embedding Refinement Layer
+  -> [Evidence Graph] + [Confidence Layer]
+  -> Explainable Answer Generator
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from .encoder import BiomedicalRoBERTaEncoder
+from .attention import MultiHeadSelfAttention
+from .recursive_refine import RecursiveEmbeddingRefinement
+from .evidence_graph import EvidenceGraph
+from .confidence import ConfidenceCalibrationHead
+from .explainability import ExplainabilityModule
+
+
+class RERBQAModel(nn.Module):
+    """
+    Recursive Embedding Refinement Biomedical QA Model.
+
+    Assembles: Encoder -> Attention -> Recursive Refinement ->
+               Evidence Graph -> Confidence -> Classifier
+    """
+
+    def __init__(
+        self,
+        encoder_name="allenai/biomed_roberta_base",
+        hidden_size=768,
+        num_labels=3,
+        num_heads=12,
+        max_iterations=5,
+        convergence_epsilon=1e-3,
+        dropout=0.3,
+        freeze_layers=0,
+        use_evidence_graph=True,
+        use_confidence=True,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_labels = num_labels
+        self.use_evidence_graph = use_evidence_graph
+        self.use_confidence = use_confidence
+
+        # 1. Biomedical RoBERTa Encoder: E0 = RoBERTa(Q, A)
+        self.encoder = BiomedicalRoBERTaEncoder(
+            model_name=encoder_name,
+            hidden_size=hidden_size,
+            freeze_layers=freeze_layers,
+        )
+
+        # 2. Recursive Embedding Refinement
+        self.recursive_refinement = RecursiveEmbeddingRefinement(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            max_iterations=max_iterations,
+            convergence_epsilon=convergence_epsilon,
+            dropout=dropout,
+        )
+
+        # 3. Evidence Graph (optional)
+        if use_evidence_graph:
+            self.evidence_graph = EvidenceGraph(
+                node_embedding_dim=hidden_size,
+                hidden_channels=hidden_size // 3,
+                num_heads=4,
+                num_layers=2,
+                dropout=dropout,
+            )
+            classifier_input_size = hidden_size * 2  # refined + graph
+        else:
+            self.evidence_graph = None
+            classifier_input_size = hidden_size
+
+        # 4. Confidence Calibration
+        if use_confidence:
+            self.confidence_head = ConfidenceCalibrationHead(
+                hidden_size=classifier_input_size,
+                num_labels=num_labels,
+            )
+
+        # 5. Classification Head
+        self.classifier = nn.Sequential(
+            nn.Linear(classifier_input_size, hidden_size),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.GELU(),
+            nn.Dropout(dropout / 2),
+            nn.Linear(hidden_size // 2, num_labels),
+        )
+
+        # 6. Explainability module (inference only)
+        self.explainability = ExplainabilityModule(
+            hidden_size=hidden_size, num_labels=num_labels,
+        )
+
+    def forward(self, input_ids, attention_mask, token_type_ids=None,
+                labels=None, graph_data=None, return_explanations=False):
+        """
+        Full forward pass.
+
+        Args:
+            input_ids: [batch, seq_len]
+            attention_mask: [batch, seq_len]
+            token_type_ids: [batch, seq_len] (optional)
+            labels: [batch] ground truth labels (optional, for loss)
+            graph_data: dict with node_features, edge_index, node_types (optional)
+            return_explanations: Whether to return explainability info.
+        Returns:
+            dict with logits, loss, confidence, explanations, convergence info.
+        """
+        # Step 1: Encode — E0 = RoBERTa(Q, A)
+        encoder_output = self.encoder(input_ids, attention_mask, token_type_ids)
+        E_0 = encoder_output["last_hidden_state"]  # [batch, seq_len, hidden]
+
+        # Step 2: Recursive Refinement — E* = refine(E0)
+        refinement_output = self.recursive_refinement(E_0, attention_mask)
+        E_star = refinement_output["refined_embedding"]  # [batch, seq_len, hidden]
+
+        # Pool: take CLS token representation
+        cls_repr = E_star[:, 0, :]  # [batch, hidden]
+
+        # Step 3: Evidence Graph (optional)
+        if self.use_evidence_graph and graph_data is not None:
+            graph_output = self.evidence_graph(
+                graph_data["node_features"],
+                graph_data["edge_index"],
+                graph_data.get("node_types"),
+            )
+            graph_emb = graph_output["graph_embedding"]  # [1, hidden]
+            graph_emb = graph_emb.expand(cls_repr.size(0), -1)
+            combined = torch.cat([cls_repr, graph_emb], dim=-1)
+        elif self.use_evidence_graph:
+            # No graph data provided — use zero padding
+            dummy_graph = torch.zeros_like(cls_repr)
+            combined = torch.cat([cls_repr, dummy_graph], dim=-1)
+        else:
+            combined = cls_repr
+
+        # Step 4: Classification
+        logits = self.classifier(combined)  # [batch, num_labels]
+
+        result = {
+            "logits": logits,
+            "refined_embedding": E_star,
+            "convergence_norms": refinement_output["convergence_norms"],
+            "num_iterations": refinement_output["num_iterations"],
+        }
+
+        # Step 5: Confidence
+        if self.use_confidence:
+            conf_output = self.confidence_head(combined, logits)
+            result["confidence"] = conf_output["confidence_score"]
+            result["calibrated_probs"] = conf_output.get("calibrated_probs")
+
+        # Step 6: Loss computation
+        if labels is not None:
+            valid_mask = labels >= 0  # Filter out -1 (unlabeled)
+            if valid_mask.sum() > 0:
+                loss = F.cross_entropy(logits[valid_mask], labels[valid_mask])
+                if self.use_confidence:
+                    loss += 0.1 * self.confidence_head.calibration_loss(
+                        logits[valid_mask], labels[valid_mask]
+                    )
+                result["loss"] = loss
+            else:
+                result["loss"] = torch.tensor(0.0, device=logits.device, requires_grad=True)
+
+        # Step 7: Explanations (optional)
+        if return_explanations:
+            attn_weights = refinement_output.get("attention_weights")
+            result["attention_heatmap"] = self.explainability.compute_attention_heatmap(
+                attn_weights
+            )
+
+        return result
+
+    def forward_from_embeddings(self, embeddings, attention_mask):
+        """
+        Forward pass starting from embeddings (for Integrated Gradients).
+        """
+        refinement_output = self.recursive_refinement(embeddings, attention_mask)
+        E_star = refinement_output["refined_embedding"]
+        cls_repr = E_star[:, 0, :]
+
+        if self.use_evidence_graph:
+            dummy_graph = torch.zeros_like(cls_repr)
+            combined = torch.cat([cls_repr, dummy_graph], dim=-1)
+        else:
+            combined = cls_repr
+
+        logits = self.classifier(combined)
+        return {"logits": logits}
+
+    def predict(self, input_ids, attention_mask, token_type_ids=None):
+        """Get predictions with confidence scores."""
+        self.eval()
+        with torch.no_grad():
+            output = self.forward(input_ids, attention_mask, token_type_ids)
+            probs = F.softmax(output["logits"], dim=-1)
+            predictions = probs.argmax(dim=-1)
+
+        label_map = {0: "Yes", 1: "No", 2: "Maybe"}
+        results = []
+        for i in range(predictions.size(0)):
+            results.append({
+                "prediction": label_map[predictions[i].item()],
+                "probabilities": {label_map[j]: probs[i, j].item() for j in range(3)},
+                "confidence": output.get("confidence", torch.zeros(1))[i].item() if "confidence" in output else probs[i].max().item(),
+            })
+        return results

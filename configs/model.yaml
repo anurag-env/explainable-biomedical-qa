@@ -1,0 +1,82 @@
+# Model Architecture Configuration
+# ---------------------------------
+
+encoder:
+  name: "allenai/biomed_roberta_base"
+  hidden_size: 768
+  freeze_layers: 6  # Number of bottom layers to freeze (0 = train all)
+  output_hidden_states: true
+
+attention:
+  num_heads: 12  # Ablate over 8, 12, 16
+  head_dim: 64   # hidden_size / num_heads
+  dropout: 0.1
+  use_layer_norm: true
+
+recursive_refinement:
+  max_iterations: 5      # Ablate over 3-10
+  convergence_epsilon: 1e-3  # ||E_{t+1} - E_t|| < epsilon
+  gru_hidden_size: 768
+  gru_num_layers: 1
+  residual_connection: true
+
+evidence_graph:
+  node_types:
+    - "Disease"
+    - "Drug"
+    - "Symptom"
+    - "Procedure"
+  edge_types:
+    - "causes"
+    - "treats"
+    - "associated_with"
+  gat:
+    num_heads: 4
+    hidden_channels: 256
+    num_layers: 2
+    dropout: 0.2
+    add_self_loops: true
+  node_embedding_dim: 768
+
+explainability:
+  shap:
+    max_evals: 500
+    batch_size: 50
+  integrated_gradients:
+    n_steps: 50
+    internal_batch_size: 32
+  attention_heatmap:
+    layer_index: -1  # Last layer
+    head_reduction: "mean"  # mean, max, or specific head index
+
+confidence:
+  hidden_size: 256
+  num_bins: 15  # For calibration (ECE)
+  temperature_scaling: true
+
+classifier:
+  num_labels: 3  # Yes, No, Maybe
+  hidden_size: 768
+  dropout: 0.3
+  activation: "gelu"
+
+translation:
+  primary_model: "ai4bharat/indictrans2-en-indic-1B"
+  baseline_models:
+    - "facebook/nllb-200-distilled-600M"
+    - "facebook/mbart-large-50-many-to-many-mmt"
+  max_length: 256
+  beam_size: 5
+
+tts:
+  english:
+    models:
+      - "tts_models/en/ljspeech/vits"
+      - "tts_models/en/ljspeech/fast_pitch"
+    default: "tts_models/en/ljspeech/vits"
+  hindi:
+    models:
+      - "tts_models/hi/custom/vits"
+    default: "tts_models/hi/custom/vits"
+  sample_rate: 22050
+  output_format: "wav"
