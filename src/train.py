@@ -67,14 +67,24 @@ def get_optimizer(model, name, lr, weight_decay):
 
 
 def get_scheduler(optimizer, name, num_training_steps, warmup_ratio=0.1):
-    """Create learning rate scheduler."""
-    from transformers import get_scheduler as hf_get_scheduler
+    """Create learning rate scheduler using PyTorch native schedulers."""
     num_warmup = int(num_training_steps * warmup_ratio)
-    return hf_get_scheduler(
-        name="cosine_with_restarts" if name == "cosine_with_restarts" else "cosine",
-        optimizer=optimizer,
-        num_warmup_steps=num_warmup,
-        num_training_steps=num_training_steps,
+
+    # Warmup: linearly scale LR from 0 to base LR
+    warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=1e-8, end_factor=1.0, total_iters=max(num_warmup, 1)
+    )
+
+    # Cosine decay after warmup
+    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(num_training_steps - num_warmup, 1)
+    )
+
+    # Chain: warmup then cosine
+    return torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[num_warmup],
     )
 
 
