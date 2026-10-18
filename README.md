@@ -53,10 +53,12 @@ Top Evidence Tokens:
 
 Tested on NVIDIA A100-SXM4-40GB GPU across staged medical benchmarks:
 
-| Stage | Benchmark Dataset | Samples | Task Description | Accuracy | Weighted F1 | Precision |
-|:---:|:---|:---:|:---|:---:|:---:|:---:|
-| **1** | **PubMedQA** | 212,269 | Biomedical literature verification | **94.60%** | **0.9405** | **0.5533** |
-| **2** | **MedQA (USMLE)** | 22,902 | Clinical board examination vignettes | **51.51%** | 0.3829 | **0.6223** |
+| Stage | Benchmark Dataset | Samples | Task Description | Accuracy | Weighted F1 | Precision | MCC |
+|:---:|:---|:---:|:---|:---:|:---:|:---:|:---:|
+| **1** | **PubMedQA** | 212,269 | Biomedical literature verification | **94.60%** | **0.9405** | 0.5533 | **0.5314** |
+| **2** | **MedQA (USMLE)** | 22,902 | Clinical board examination vignettes | **71.28%** | **0.7017** | **0.7512** | **0.4634** |
+
+> **Key Clinical Finding (Ablation)**: Expanding sequence length from 128 to 384 tokens yielded an immediate **+19.8% jump in test accuracy** (51.5% $\to$ 71.3%) and boosted precision to **75.1%**, proving that retaining full clinical vignettes (patient vitals, lab panels, and differential diagnosis options) is critical for medical reasoning.
 
 ---
 

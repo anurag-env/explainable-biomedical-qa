@@ -120,9 +120,9 @@ class RERBQAPipeline:
             pred_idx = probs.argmax(dim=-1).item()
             answer_text = self.label_map[pred_idx]
 
-            # Get confidence
-            if "confidence" in output:
-                confidence = output["confidence"][0].item() * 100
+            # Get confidence from calibrated probability of the predicted class
+            if "calibrated_probs" in output and output["calibrated_probs"] is not None:
+                confidence = output["calibrated_probs"][0][pred_idx].item() * 100
             else:
                 confidence = probs[pred_idx].item() * 100
 
