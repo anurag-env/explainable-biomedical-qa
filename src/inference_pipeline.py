@@ -146,7 +146,9 @@ class RERBQAPipeline:
             if not context or len(context.strip()) == 0:
                 confidence = min(confidence, 65.0)
                 safety_warning = "Ungrounded query: No clinical evidence context provided."
-            
+                probs = torch.clamp(probs, min=0.15, max=0.65)
+                probs = probs / probs.sum()
+
             # Safety Guardrail 2: Entity Grounding Verification
             if "Candidate:" in question:
                 candidate_name = question.split("Candidate:")[-1].strip().lower()
@@ -160,8 +162,10 @@ class RERBQAPipeline:
                     for tok in evidence_tokens if len(tok) >= 3
                 )
                 if not has_entity_attention and context:
-                    confidence = min(confidence, 60.0)
                     safety_warning = f"Entity Grounding Warning: Candidate '{candidate_name}' was not directly supported by top evidence tokens."
+                    answer_text = "Maybe (Unverified)"
+                    confidence = 50.0
+                    probs = torch.tensor([0.35, 0.35, 0.30])
 
         # 4. Translation
         translated_answer = None
