@@ -210,6 +210,9 @@ def main():
     print("\n" + "="*50)
     print(f"Question: {result['question']}")
     print(f"Answer:   {result['prediction']} (Confidence: {result['confidence']:.1f}%)")
+    print("Class Probabilities:")
+    for lbl, pr in result["probabilities"].items():
+        print(f"  - {lbl:>5}: {pr * 100:.1f}%")
     
     if result["translation"]:
         print(f"Hindi:    {result['translation']}")

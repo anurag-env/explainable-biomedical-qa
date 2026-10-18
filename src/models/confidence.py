@@ -55,9 +55,10 @@ class ConfidenceCalibrationHead(nn.Module):
         result = {"confidence_score": confidence_score, "temperature": self.temperature.item()}
 
         if logits is not None:
-            # Temperature-scaled probabilities
+            # Temperature-scaled probabilities (clamp temperature >= 1.0 to prevent artificial inflation)
             if self.use_temperature:
-                calibrated_logits = logits / self.temperature
+                temp = torch.clamp(self.temperature, min=1.0)
+                calibrated_logits = logits / temp
             else:
                 calibrated_logits = logits
             calibrated_probs = F.softmax(calibrated_logits, dim=-1)
