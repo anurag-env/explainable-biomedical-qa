@@ -51,6 +51,6 @@ schema:
 preprocessing:
   lowercase: false  # Biomedical terms are case-sensitive
   remove_special_chars: false
-  max_question_length: 128
+  max_question_length: 384
   max_context_length: 128
   tokenizer: "allenai/biomed_roberta_base"
