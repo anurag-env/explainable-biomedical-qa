@@ -32,7 +32,7 @@ class MultilingualTranslator:
         "mbart": "facebook/mbart-large-50-many-to-many-mmt",
     }
 
-    def __init__(self, model_name="indictrans2", device=None):
+    def __init__(self, model_name="nllb", device=None):
         self.model_name = model_name
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
@@ -120,9 +120,10 @@ class MultilingualTranslator:
         inputs = self.tokenizer(text, return_tensors="pt", padding=True,
                                 truncation=True, max_length=max_length).to(self.device)
 
+        forced_bos_token_id = self.tokenizer.convert_tokens_to_ids(tgt_lang)
         with torch.no_grad():
             outputs = self.model.generate(
-                **inputs, forced_bos_token_id=self.tokenizer.lang_code_to_id[tgt_lang],
+                **inputs, forced_bos_token_id=forced_bos_token_id,
                 max_length=max_length, num_beams=beam_size,
             )
         return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
