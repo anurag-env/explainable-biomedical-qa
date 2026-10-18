@@ -162,11 +162,11 @@ class RERBQAModel(nn.Module):
             result["confidence"] = conf_output["confidence_score"]
             result["calibrated_probs"] = conf_output.get("calibrated_probs")
 
-        # Step 6: Loss computation
+        # Step 6: Loss computation (with label smoothing to prevent false overconfidence)
         if labels is not None:
             valid_mask = labels >= 0  # Filter out -1 (unlabeled)
             if valid_mask.sum() > 0:
-                loss = F.cross_entropy(logits[valid_mask], labels[valid_mask])
+                loss = F.cross_entropy(logits[valid_mask], labels[valid_mask], label_smoothing=0.1)
                 if self.use_confidence:
                     loss += 0.1 * self.confidence_head.calibration_loss(
                         logits[valid_mask], labels[valid_mask]

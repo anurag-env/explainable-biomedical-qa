@@ -126,8 +126,9 @@ class RERBQAPipeline:
             else:
                 confidence = probs[pred_idx].item() * 100
 
-        # 3. Explanations
+        # 3. Explanations & Clinical Safety Guardrail
         explanations = None
+        safety_warning = None
         if explain:
             heatmap = output.get("attention_heatmap", {}).get("heatmap")
             tokens = self.tokenizer.convert_ids_to_tokens(input_ids[0].cpu().tolist())
@@ -140,6 +141,27 @@ class RERBQAPipeline:
                 confidence=confidence,
                 top_k=5,
             )
+
+            # Safety Guardrail 1: Context Abstention (prevent naked question overconfidence)
+            if not context or len(context.strip()) == 0:
+                confidence = min(confidence, 65.0)
+                safety_warning = "Ungrounded query: No clinical evidence context provided."
+            
+            # Safety Guardrail 2: Entity Grounding Verification
+            if "Candidate:" in question:
+                candidate_name = question.split("Candidate:")[-1].strip().lower()
+                evidence_tokens = [
+                    ev["token"].replace("Ġ", "").lower()
+                    for ev in explanations.get("evidence", [])
+                ]
+                # Check if candidate entity was actually attended to
+                has_entity_attention = any(
+                    (tok in candidate_name or candidate_name in tok)
+                    for tok in evidence_tokens if len(tok) >= 3
+                )
+                if not has_entity_attention and context:
+                    confidence = min(confidence, 60.0)
+                    safety_warning = f"Entity Grounding Warning: Candidate '{candidate_name}' was not directly supported by top evidence tokens."
 
         # 4. Translation
         translated_answer = None
@@ -174,6 +196,7 @@ class RERBQAPipeline:
             "prediction": answer_text,
             "probabilities": {self.label_map[i]: probs[i].item() for i in range(3)},
             "confidence": confidence,
+            "safety_warning": safety_warning,
             "num_refinement_iterations": output["num_iterations"],
             "explanations": explanations,
             "translation": translated_answer,
@@ -213,6 +236,9 @@ def main():
     print("Class Probabilities:")
     for lbl, pr in result["probabilities"].items():
         print(f"  - {lbl:>5}: {pr * 100:.1f}%")
+        
+    if result.get("safety_warning"):
+        print(f"\n⚠️  Clinical Safety Alert: {result['safety_warning']}")
     
     if result["translation"]:
         print(f"Hindi:    {result['translation']}")
