@@ -204,10 +204,18 @@ def train_stage(stage, configs, model=None, resume_from=None, device="cuda"):
         )
 
     # Resume from checkpoint
-    if resume_from and os.path.exists(resume_from):
-        print(f"Resuming from: {resume_from}")
-        state_dict = torch.load(resume_from, map_location="cpu")
-        model.load_state_dict(state_dict, strict=False)
+    if resume_from is None:
+        resume_from = train_cfg.get("resume_from")
+
+    if resume_from:
+        if not os.path.exists(resume_from) and os.path.exists(f"{resume_from}.pt"):
+            resume_from = f"{resume_from}.pt"
+        if os.path.exists(resume_from):
+            print(f"Resuming from: {resume_from}")
+            state_dict = torch.load(resume_from, map_location="cpu")
+            model.load_state_dict(state_dict, strict=False)
+        else:
+            print(f"Warning: Checkpoint not found at {resume_from}")
 
     model = model.to(device)
 
