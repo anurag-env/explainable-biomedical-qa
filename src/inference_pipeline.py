@@ -50,16 +50,23 @@ class RERBQAPipeline:
             "encoder_name": "allenai/biomed_roberta_base",
             "hidden_size": 768,
             "num_labels": 3,
-            "use_evidence_graph": False,  # Simplified for inference if graph isn't built
+            "use_evidence_graph": True,
         }
         if config_overrides:
             model_kwargs.update(config_overrides)
 
-        self.model = RERBQAModel(**model_kwargs)
-
+        state_dict = None
         if os.path.exists(checkpoint_path):
             print(f"Loading checkpoint: {checkpoint_path}")
             state_dict = torch.load(checkpoint_path, map_location="cpu")
+            # Auto-detect whether checkpoint was trained with evidence graph (1536 vs 768)
+            if "classifier.0.weight" in state_dict:
+                cls_in_dim = state_dict["classifier.0.weight"].shape[-1]
+                model_kwargs["use_evidence_graph"] = (cls_in_dim == 1536)
+
+        self.model = RERBQAModel(**model_kwargs)
+
+        if state_dict is not None:
             self.model.load_state_dict(state_dict, strict=False)
         else:
             print(f"Warning: Checkpoint not found at {checkpoint_path}. Using untrained weights.")
