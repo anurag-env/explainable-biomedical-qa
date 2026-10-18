@@ -59,6 +59,11 @@ class BiomedicalQADataset(Dataset):
 
         # Load records
         self.records = self._load_records(data_path)
+        if len(self.records) == 0:
+            raise FileNotFoundError(
+                f"No records found in '{data_path}'. "
+                f"Please verify that the dataset was downloaded by running the corresponding script in data/scripts/."
+            )
 
     def _load_records(self, data_path: Union[str, Path, List[str]]) -> List[dict]:
         """Load records from JSONL file(s) or directory."""
@@ -70,7 +75,11 @@ class BiomedicalQADataset(Dataset):
         elif isinstance(data_path, (str, Path)):
             path = Path(data_path)
             if path.is_dir():
-                for jsonl_file in sorted(path.glob("**/*.jsonl")):
+                jsonl_files = sorted(path.glob("**/*.jsonl"))
+                # If specific split files exist alongside an *_all.jsonl, use only the split files
+                split_files = [f for f in jsonl_files if not f.name.endswith("_all.jsonl")]
+                files_to_load = split_files if split_files else jsonl_files
+                for jsonl_file in files_to_load:
                     records.extend(self._load_single(jsonl_file))
             else:
                 records.extend(self._load_single(path))
@@ -91,7 +100,39 @@ class BiomedicalQADataset(Dataset):
                 if line:
                     try:
                         record = json.loads(line)
-                        records.append(record)
+                        # Transform MedQA multiple choice into verification pairs (Yes/No)
+                        if record.get("source") == "medqa" and not record.get("label"):
+                            q = record.get("question", "")
+                            ans = record.get("answer", "")
+                            ctx = record.get("context", "")
+                            options = [
+                                opt.split(":", 1)[-1].strip()
+                                for opt in ctx.split(" | ")
+                                if ":" in opt
+                            ]
+                            distractors = [opt for opt in options if opt.lower() != ans.lower()]
+
+                            # Positive sample (Correct answer -> Yes)
+                            records.append({
+                                "question": f"{q} Candidate: {ans}",
+                                "context": ctx,
+                                "answer": ans,
+                                "label": "Yes",
+                                "source": "medqa",
+                                "subset": record.get("subset", "usmle"),
+                            })
+                            # Negative sample (Distractor -> No)
+                            if distractors:
+                                records.append({
+                                    "question": f"{q} Candidate: {distractors[0]}",
+                                    "context": ctx,
+                                    "answer": distractors[0],
+                                    "label": "No",
+                                    "source": "medqa",
+                                    "subset": record.get("subset", "usmle"),
+                                })
+                        else:
+                            records.append(record)
                     except json.JSONDecodeError:
                         continue
         return records
