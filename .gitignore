@@ -43,3 +43,7 @@ data/processed/
 
 # Stray pip artifact
 =2.0.0
+
+# Chat notes and conversation logs
+chat1.md
+chat*.md
