@@ -91,28 +91,46 @@ def download_medqa(output_dir: str = "data/raw/medqa") -> dict:
 def normalize_medqa_record(item: dict) -> dict:
     """
     Normalize a MedQA record (from GBaker/MedQA-USMLE-4-options) into unified schema.
+
+    Preserves structured multi-choice options alongside the legacy context format.
     """
     question = item.get("question", item.get("sent1", ""))
 
     # Build context from the options
-    options = item.get("options", {})
-    if isinstance(options, dict):
-        context_parts = [f"{k}: {v}" for k, v in options.items()]
+    options_raw = item.get("options", {})
+    if isinstance(options_raw, dict):
+        option_keys = list(options_raw.keys())
+        option_values = list(options_raw.values())
+        context_parts = [f"{k}: {v}" for k, v in options_raw.items()]
         context = " | ".join(context_parts)
-    elif isinstance(options, list):
-        context = " | ".join(options)
+    elif isinstance(options_raw, list):
+        option_keys = [chr(65 + i) for i in range(len(options_raw))]
+        option_values = list(options_raw)
+        context = " | ".join(options_raw)
     else:
-        context = str(options) if options else ""
+        option_keys = []
+        option_values = []
+        context = str(options_raw) if options_raw else ""
 
     # Get the correct answer
-    answer_idx = item.get("answer_idx", item.get("answer", ""))
+    answer_idx_raw = item.get("answer_idx", item.get("answer", ""))
     answer = item.get("answer", "")
 
-    # If answer is an index into options
-    if isinstance(answer_idx, str) and isinstance(options, dict) and answer_idx in options:
-        answer = options[answer_idx]
-    elif isinstance(answer, int) and isinstance(options, list) and answer < len(options):
-        answer = options[answer]
+    # Resolve answer_idx to a 0-based integer index
+    answer_idx_int = None
+    if isinstance(answer_idx_raw, str) and isinstance(options_raw, dict) and answer_idx_raw in options_raw:
+        answer = options_raw[answer_idx_raw]
+        answer_idx_int = option_keys.index(answer_idx_raw)
+    elif isinstance(answer, int) and isinstance(options_raw, list) and answer < len(options_raw):
+        answer_idx_int = answer
+        answer = options_raw[answer]
+    else:
+        # Try to find answer in option values
+        answer_lower = str(answer).strip().lower()
+        for i, val in enumerate(option_values):
+            if str(val).strip().lower() == answer_lower:
+                answer_idx_int = i
+                break
 
     # Map to Yes/No/Maybe where applicable
     label = ""
@@ -127,23 +145,39 @@ def normalize_medqa_record(item: dict) -> dict:
         "label": label,
         "source": "medqa",
         "subset": "usmle",
+        # Multi-choice fields
+        "options": option_values,
+        "answer_idx": answer_idx_int,
+        "task_type": "multi_choice",
     }
 
 
 def normalize_medqa_record_bigbio(item: dict) -> dict:
     """
     Normalize from bigbio/med_qa format.
+
+    Preserves structured multi-choice options.
     """
     question = item.get("question", "")
     choices = item.get("choices", [])
 
+    option_values = []
     context = ""
     if choices:
         if isinstance(choices, list):
-            context = " | ".join(str(c) for c in choices)
+            option_values = [str(c) for c in choices]
+            context = " | ".join(option_values)
 
     answer = item.get("answer", "")
     label = ""
+
+    # Find answer index
+    answer_idx_int = None
+    answer_lower = str(answer).strip().lower()
+    for i, val in enumerate(option_values):
+        if val.strip().lower() == answer_lower:
+            answer_idx_int = i
+            break
 
     return {
         "question": question,
@@ -152,6 +186,10 @@ def normalize_medqa_record_bigbio(item: dict) -> dict:
         "label": label,
         "source": "medqa",
         "subset": "usmle",
+        # Multi-choice fields
+        "options": option_values,
+        "answer_idx": answer_idx_int,
+        "task_type": "multi_choice",
     }
 
 

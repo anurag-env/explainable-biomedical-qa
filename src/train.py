@@ -27,7 +27,7 @@ from torch.utils.tensorboard import SummaryWriter
 import yaml
 
 from src.models.rerb_qa import RERBQAModel
-from src.data.dataset import BiomedicalQADataset, create_dataloaders
+from src.data.dataset import BiomedicalQADataset, create_dataloaders, create_multi_choice_dataloaders
 from src.data.preprocessing import BiomedicalPreprocessor
 
 
@@ -89,7 +89,8 @@ def get_scheduler(optimizer, name, num_training_steps, warmup_ratio=0.1):
 
 
 def train_one_epoch(model, dataloader, optimizer, scheduler, device, epoch,
-                    writer=None, grad_accum_steps=4, max_grad_norm=1.0):
+                    writer=None, grad_accum_steps=4, max_grad_norm=1.0,
+                    task_type="classification"):
     """Train for one epoch."""
     model.train()
     total_loss = 0
@@ -101,7 +102,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device, epoch,
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
 
-        output = model(input_ids, attention_mask, labels=labels)
+        output = model(input_ids, attention_mask, labels=labels, task_type=task_type)
         loss = output["loss"] / grad_accum_steps
         loss.backward()
 
@@ -127,7 +128,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device, epoch,
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, device):
+def evaluate(model, dataloader, device, task_type="classification"):
     """Evaluate model on a dataset."""
     model.eval()
     total_loss = 0
@@ -142,7 +143,7 @@ def evaluate(model, dataloader, device):
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
 
-        output = model(input_ids, attention_mask, labels=labels)
+        output = model(input_ids, attention_mask, labels=labels, task_type=task_type)
 
         if "loss" in output:
             total_loss += output["loss"].item()
@@ -219,18 +220,37 @@ def train_stage(stage, configs, model=None, resume_from=None, device="cuda"):
 
     model = model.to(device)
 
+    task_type = train_cfg.get(
+        "task_type",
+        "multi_choice" if dataset_name == "medqa" else "classification"
+    )
+
     # Create dataloaders
     data_path = ds_cfg["processed_dir"] if os.path.exists(ds_cfg["processed_dir"]) else ds_cfg["raw_dir"]
-    train_loader, val_loader, test_loader = create_dataloaders(
-        data_path=data_path,
-        batch_size=train_cfg["batch_size"],
-        max_length=data_cfg["preprocessing"]["max_question_length"],
-        tokenizer_name=data_cfg["preprocessing"]["tokenizer"],
-        train_ratio=ds_cfg["splits"]["train"],
-        val_ratio=ds_cfg["splits"]["val"],
-        test_ratio=ds_cfg["splits"]["test"],
-        seed=general_cfg.get("seed", 42),
-    )
+    if task_type == "multi_choice":
+        max_options = configs["model"].get("multi_choice", {}).get("max_options", 5)
+        train_loader, val_loader, test_loader = create_multi_choice_dataloaders(
+            data_path=data_path,
+            batch_size=train_cfg["batch_size"],
+            max_length=data_cfg["preprocessing"]["max_question_length"],
+            tokenizer_name=data_cfg["preprocessing"]["tokenizer"],
+            train_ratio=ds_cfg["splits"]["train"],
+            val_ratio=ds_cfg["splits"]["val"],
+            test_ratio=ds_cfg["splits"]["test"],
+            seed=general_cfg.get("seed", 42),
+            max_options=max_options,
+        )
+    else:
+        train_loader, val_loader, test_loader = create_dataloaders(
+            data_path=data_path,
+            batch_size=train_cfg["batch_size"],
+            max_length=data_cfg["preprocessing"]["max_question_length"],
+            tokenizer_name=data_cfg["preprocessing"]["tokenizer"],
+            train_ratio=ds_cfg["splits"]["train"],
+            val_ratio=ds_cfg["splits"]["val"],
+            test_ratio=ds_cfg["splits"]["test"],
+            seed=general_cfg.get("seed", 42),
+        )
 
     # Setup training
     optimizer = get_optimizer(
@@ -262,9 +282,10 @@ def train_stage(stage, configs, model=None, resume_from=None, device="cuda"):
             writer=writer,
             grad_accum_steps=general_cfg.get("gradient_accumulation_steps", 4),
             max_grad_norm=general_cfg.get("max_grad_norm", 1.0),
+            task_type=task_type,
         )
 
-        val_metrics = evaluate(model, val_loader, device)
+        val_metrics = evaluate(model, val_loader, device, task_type=task_type)
 
         print(f"\nEpoch {epoch}/{train_cfg['epochs']}")
         print(f"  Train Loss: {train_loss:.4f}")
@@ -294,7 +315,7 @@ def train_stage(stage, configs, model=None, resume_from=None, device="cuda"):
 
     # Final evaluation on test set
     model.load_state_dict(torch.load(ckpt_dir / "best.pt", map_location=device))
-    test_metrics = evaluate(model, test_loader, device)
+    test_metrics = evaluate(model, test_loader, device, task_type=task_type)
     print(f"\nTest Results (Stage {stage}):")
     for k, v in test_metrics.items():
         print(f"  {k}: {v:.4f}")

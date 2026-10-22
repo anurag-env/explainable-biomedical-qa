@@ -17,6 +17,7 @@ stages:
   2:
     name: "MedQA Fine-tuning"
     dataset: "medqa"
+    task_type: "multi_choice"
     epochs: 15
     batch_size: 16
     learning_rate: 1e-5

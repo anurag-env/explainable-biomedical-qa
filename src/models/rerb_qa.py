@@ -43,12 +43,14 @@ class RERBQAModel(nn.Module):
         freeze_layers=0,
         use_evidence_graph=True,
         use_confidence=True,
+        max_options=5,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_labels = num_labels
         self.use_evidence_graph = use_evidence_graph
         self.use_confidence = use_confidence
+        self.max_options = max_options
 
         # 1. Biomedical RoBERTa Encoder: E0 = RoBERTa(Q, A)
         self.encoder = BiomedicalRoBERTaEncoder(
@@ -87,7 +89,7 @@ class RERBQAModel(nn.Module):
                 num_labels=num_labels,
             )
 
-        # 5. Classification Head
+        # 5. Classification Head (Yes/No/Maybe)
         self.classifier = nn.Sequential(
             nn.Linear(classifier_input_size, hidden_size),
             nn.GELU(),
@@ -98,26 +100,44 @@ class RERBQAModel(nn.Module):
             nn.Linear(hidden_size // 2, num_labels),
         )
 
-        # 6. Explainability module (inference only)
+        # 6. Multi-Choice Scoring Head (selects best option from A/B/C/D)
+        self.mc_scorer = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size // 2, 1),
+        )
+
+        # 7. Explainability module (inference only)
         self.explainability = ExplainabilityModule(
             hidden_size=hidden_size, num_labels=num_labels,
         )
 
     def forward(self, input_ids, attention_mask, token_type_ids=None,
-                labels=None, graph_data=None, return_explanations=False):
+                labels=None, graph_data=None, return_explanations=False,
+                task_type="classification"):
         """
         Full forward pass.
 
         Args:
-            input_ids: [batch, seq_len]
-            attention_mask: [batch, seq_len]
+            input_ids: [batch, seq_len] for classification,
+                       [batch, num_options, seq_len] for multi_choice.
+            attention_mask: [batch, seq_len] or [batch, num_options, seq_len].
             token_type_ids: [batch, seq_len] (optional)
             labels: [batch] ground truth labels (optional, for loss)
             graph_data: dict with node_features, edge_index, node_types (optional)
             return_explanations: Whether to return explainability info.
+            task_type: "classification" (Yes/No/Maybe) or "multi_choice" (A/B/C/D).
         Returns:
             dict with logits, loss, confidence, explanations, convergence info.
         """
+        # Route to multi-choice head if applicable
+        if task_type == "multi_choice":
+            return self._forward_multi_choice(
+                input_ids, attention_mask, labels=labels,
+                return_explanations=return_explanations,
+            )
+
         # Step 1: Encode — E0 = RoBERTa(Q, A)
         encoder_output = self.encoder(input_ids, attention_mask, token_type_ids)
         E_0 = encoder_output["last_hidden_state"]  # [batch, seq_len, hidden]
@@ -184,6 +204,88 @@ class RERBQAModel(nn.Module):
 
         return result
 
+    def _forward_multi_choice(self, input_ids, attention_mask, labels=None,
+                               return_explanations=False):
+        """
+        Multi-choice forward pass. Scores each option independently
+        and selects the best diagnosis from the available options.
+
+        Args:
+            input_ids: [batch, num_options, seq_len]
+            attention_mask: [batch, num_options, seq_len]
+            labels: [batch] index of the correct option (0-based)
+            return_explanations: Whether to return explainability info.
+
+        Returns:
+            dict with logits [batch, num_options], loss, confidence, etc.
+        """
+        batch_size, num_options, seq_len = input_ids.shape
+
+        # Flatten options into batch dimension: [batch * num_options, seq_len]
+        flat_ids = input_ids.view(-1, seq_len)
+        flat_mask = attention_mask.view(-1, seq_len)
+
+        # Step 1: Encode each (question, option_i) pair
+        encoder_output = self.encoder(flat_ids, flat_mask)
+        E_0 = encoder_output["last_hidden_state"]
+
+        # Step 2: Recursive Refinement
+        refinement_output = self.recursive_refinement(E_0, flat_mask)
+        E_star = refinement_output["refined_embedding"]
+
+        # Pool: CLS token representation
+        cls_repr = E_star[:, 0, :]  # [B*N, hidden]
+
+        # Step 3: Score each option via the multi-choice head
+        scores = self.mc_scorer(cls_repr).squeeze(-1)  # [B*N]
+        logits = scores.view(batch_size, num_options)   # [B, N]
+
+        result = {
+            "logits": logits,
+            "convergence_norms": refinement_output["convergence_norms"],
+            "num_iterations": refinement_output["num_iterations"],
+        }
+
+        # Step 4: Confidence calibration on the selected option
+        if self.use_confidence:
+            cls_reshaped = cls_repr.view(batch_size, num_options, -1)
+            best_idx = logits.argmax(dim=-1)
+            best_cls = cls_reshaped[
+                torch.arange(batch_size, device=logits.device), best_idx
+            ]
+            if self.use_evidence_graph:
+                dummy = torch.zeros_like(best_cls)
+                combined_for_conf = torch.cat([best_cls, dummy], dim=-1)
+            else:
+                combined_for_conf = best_cls
+            conf_output = self.confidence_head(combined_for_conf, logits)
+            result["confidence"] = conf_output["confidence_score"]
+            result["calibrated_probs"] = conf_output.get("calibrated_probs")
+
+        # Step 5: Loss
+        if labels is not None:
+            valid_mask = labels >= 0
+            if valid_mask.sum() > 0:
+                loss = F.cross_entropy(logits[valid_mask], labels[valid_mask])
+                if self.use_confidence:
+                    loss += 0.1 * self.confidence_head.calibration_loss(
+                        logits[valid_mask], labels[valid_mask]
+                    )
+                result["loss"] = loss
+            else:
+                result["loss"] = torch.tensor(
+                    0.0, device=logits.device, requires_grad=True
+                )
+
+        # Step 6: Explanations
+        if return_explanations:
+            attn_weights = refinement_output.get("attention_weights")
+            result["attention_heatmap"] = (
+                self.explainability.compute_attention_heatmap(attn_weights)
+            )
+
+        return result
+
     def forward_from_embeddings(self, embeddings, attention_mask):
         """
         Forward pass starting from embeddings (for Integrated Gradients).
@@ -216,5 +318,41 @@ class RERBQAModel(nn.Module):
                 "prediction": label_map[predictions[i].item()],
                 "probabilities": {label_map[j]: probs[i, j].item() for j in range(3)},
                 "confidence": output.get("confidence", torch.zeros(1))[i].item() if "confidence" in output else probs[i].max().item(),
+            })
+        return results
+
+    def predict_multi_choice(self, input_ids, attention_mask, option_texts=None):
+        """Get multi-choice predictions with probabilities for all options.
+
+        Args:
+            input_ids: [batch, num_options, seq_len]
+            attention_mask: [batch, num_options, seq_len]
+            option_texts: Optional list of option text strings for labeling.
+
+        Returns:
+            List of dicts with prediction index, option probabilities, and confidence.
+        """
+        self.eval()
+        with torch.no_grad():
+            output = self._forward_multi_choice(input_ids, attention_mask)
+            probs = F.softmax(output["logits"], dim=-1)
+            predictions = probs.argmax(dim=-1)
+
+        results = []
+        for i in range(predictions.size(0)):
+            num_opts = probs.size(1)
+            option_probs = {}
+            for j in range(num_opts):
+                label = f"Option {chr(65 + j)}"
+                if option_texts and j < len(option_texts):
+                    label += f" ({option_texts[j]})"
+                option_probs[label] = probs[i, j].item()
+
+            results.append({
+                "prediction": predictions[i].item(),
+                "prediction_label": f"Option {chr(65 + predictions[i].item())}",
+                "probabilities": option_probs,
+                "confidence": output.get("confidence", torch.zeros(1))[i].item()
+                    if "confidence" in output else probs[i].max().item(),
             })
         return results

@@ -280,3 +280,297 @@ def create_dataloaders(
 
     print(f"Dataset splits: train={train_size}, val={val_size}, test={test_size}")
     return train_loader, val_loader, test_loader
+
+
+class MultiChoiceQADataset(Dataset):
+    """
+    PyTorch Dataset for multi-choice biomedical QA data (MedQA style).
+
+    Instead of converting options to Yes/No pairs, this dataset preserves
+    the original multiple-choice structure so the model can compare all
+    options simultaneously and pick the best diagnosis.
+
+    Expected schema per record:
+    {
+        "question": str,
+        "options": list[str] or dict[str, str],
+        "answer_idx": int (0-based index of correct option),
+        "context": str (legacy format, used as fallback),
+        "answer": str,
+        "source": str
+    }
+    """
+
+    def __init__(
+        self,
+        data_path: Union[str, Path, List[str]],
+        preprocessor: Optional[BiomedicalPreprocessor] = None,
+        max_length: int = 512,
+        tokenizer_name: str = "allenai/biomed_roberta_base",
+        max_options: int = 5,
+    ):
+        """
+        Args:
+            data_path: Path to JSONL file(s) or directory containing JSONL files.
+            preprocessor: BiomedicalPreprocessor instance (created if None).
+            max_length: Maximum token sequence length per option pair.
+            tokenizer_name: HuggingFace tokenizer to use.
+            max_options: Maximum number of options to support (padding applied).
+        """
+        self.max_length = max_length
+        self.max_options = max_options
+
+        if preprocessor is None:
+            self.preprocessor = BiomedicalPreprocessor(
+                tokenizer_name=tokenizer_name,
+                max_question_length=max_length,
+                max_context_length=max_length,
+            )
+        else:
+            self.preprocessor = preprocessor
+
+        self.records = self._load_records(data_path)
+        if len(self.records) == 0:
+            raise FileNotFoundError(
+                f"No multi-choice records found in '{data_path}'. "
+                f"Please verify that the dataset was downloaded with multi-choice "
+                f"fields by re-running data/scripts/download_medqa.py."
+            )
+
+    def _load_records(self, data_path: Union[str, Path, List[str]]) -> List[dict]:
+        """Load multi-choice records from JSONL file(s) or directory."""
+        records = []
+
+        if isinstance(data_path, list):
+            for p in data_path:
+                records.extend(self._load_single(p))
+        elif isinstance(data_path, (str, Path)):
+            path = Path(data_path)
+            if path.is_dir():
+                jsonl_files = sorted(path.glob("**/*.jsonl"))
+                split_files = [f for f in jsonl_files if not f.name.endswith("_all.jsonl")]
+                files_to_load = split_files if split_files else jsonl_files
+                for jsonl_file in files_to_load:
+                    records.extend(self._load_single(jsonl_file))
+            else:
+                records.extend(self._load_single(path))
+
+        return records
+
+    def _load_single(self, filepath: Union[str, Path]) -> List[dict]:
+        """Load multi-choice records from a single JSONL file."""
+        records = []
+        filepath = Path(filepath)
+        if not filepath.exists():
+            print(f"Warning: {filepath} does not exist, skipping.")
+            return records
+
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+
+                    # Extract options
+                    options = record.get("options")
+                    if options is None:
+                        # Parse from legacy context field ("A: X | B: Y | ...")
+                        options = self._parse_options_from_context(
+                            record.get("context", "")
+                        )
+                    elif isinstance(options, dict):
+                        options = list(options.values())
+
+                    if len(options) < 2:
+                        continue  # Need at least 2 options
+
+                    # Determine correct answer index
+                    answer_idx = record.get("answer_idx")
+                    if answer_idx is None:
+                        answer_text = record.get("answer", "")
+                        answer_idx = self._find_answer_index(
+                            options, answer_text, record.get("options")
+                        )
+                    elif isinstance(answer_idx, str):
+                        answer_idx = ord(answer_idx.upper()) - ord("A")
+
+                    if answer_idx is None or answer_idx < 0 or answer_idx >= len(options):
+                        continue  # Skip records without valid answer index
+
+                    records.append({
+                        "question": record.get("question", ""),
+                        "options": options,
+                        "answer_idx": answer_idx,
+                        "source": record.get("source", "medqa"),
+                    })
+                except json.JSONDecodeError:
+                    continue
+
+        return records
+
+    @staticmethod
+    def _parse_options_from_context(context: str) -> List[str]:
+        """Parse 'A: X | B: Y | ...' format into list of option texts."""
+        if not context:
+            return []
+        parts = context.split(" | ")
+        options = []
+        for part in parts:
+            if ":" in part:
+                options.append(part.split(":", 1)[-1].strip())
+            else:
+                options.append(part.strip())
+        return options
+
+    @staticmethod
+    def _find_answer_index(option_texts, answer_text, original_options):
+        """Find the 0-based index of the correct answer in the options list."""
+        answer_lower = str(answer_text).strip().lower()
+
+        # Exact match
+        for i, opt in enumerate(option_texts):
+            if opt.strip().lower() == answer_lower:
+                return i
+
+        # Match via original option keys (dict)
+        if isinstance(original_options, dict):
+            for i, (key, val) in enumerate(original_options.items()):
+                if str(val).strip().lower() == answer_lower:
+                    return i
+
+        # Substring match as fallback
+        for i, opt in enumerate(option_texts):
+            if answer_lower in opt.lower() or opt.lower() in answer_lower:
+                return i
+
+        return None
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        record = self.records[idx]
+        question = record["question"]
+        options = record["options"][:self.max_options]
+        answer_idx = record["answer_idx"]
+        num_real_options = len(options)
+
+        # Pad to max_options with empty strings
+        while len(options) < self.max_options:
+            options.append("")
+
+        # Tokenize each option paired with the question
+        encoded = self.preprocessor.tokenize_multi_choice(
+            question=question,
+            options=options,
+            max_length=self.max_length,
+            return_tensors="pt",
+        )
+
+        item = {
+            "input_ids": encoded["input_ids"],            # [max_options, seq_len]
+            "attention_mask": encoded["attention_mask"],   # [max_options, seq_len]
+            "labels": torch.tensor(answer_idx, dtype=torch.long),
+            "num_options": torch.tensor(num_real_options, dtype=torch.long),
+        }
+
+        return item
+
+    def get_label_distribution(self) -> Dict[str, int]:
+        """Get distribution of correct answer positions."""
+        dist = {}
+        for record in self.records:
+            key = f"Option {chr(65 + record['answer_idx'])}"
+            dist[key] = dist.get(key, 0) + 1
+        return dist
+
+
+def create_multi_choice_dataloaders(
+    data_path: Union[str, Path, List[str]],
+    batch_size: int = 16,
+    max_length: int = 512,
+    tokenizer_name: str = "allenai/biomed_roberta_base",
+    max_options: int = 5,
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.1,
+    test_ratio: float = 0.1,
+    num_workers: int = 4,
+    seed: int = 42,
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """
+    Create train/val/test DataLoaders for multi-choice QA datasets.
+
+    Args:
+        data_path: Path to data file(s) or directory.
+        batch_size: Batch size for DataLoaders.
+        max_length: Maximum token sequence length per option pair.
+        tokenizer_name: HuggingFace tokenizer name.
+        max_options: Maximum number of options to support.
+        train_ratio: Fraction for training set.
+        val_ratio: Fraction for validation set.
+        test_ratio: Fraction for test set.
+        num_workers: Number of DataLoader workers.
+        seed: Random seed for reproducible splits.
+
+    Returns:
+        Tuple of (train_loader, val_loader, test_loader).
+    """
+    assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, \
+        "Split ratios must sum to 1.0"
+
+    preprocessor = BiomedicalPreprocessor(
+        tokenizer_name=tokenizer_name,
+        max_question_length=max_length,
+        max_context_length=max_length,
+    )
+
+    dataset = MultiChoiceQADataset(
+        data_path=data_path,
+        preprocessor=preprocessor,
+        max_length=max_length,
+        max_options=max_options,
+    )
+
+    # Split dataset
+    total = len(dataset)
+    train_size = int(total * train_ratio)
+    val_size = int(total * val_ratio)
+    test_size = total - train_size - val_size
+
+    generator = torch.Generator().manual_seed(seed)
+    train_dataset, val_dataset, test_dataset = random_split(
+        dataset, [train_size, val_size, test_size], generator=generator
+    )
+
+    # Create DataLoaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
+
+    print(f"Multi-choice dataset splits: train={train_size}, val={val_size}, test={test_size}")
+    print(f"Options per question: max={max_options}")
+    return train_loader, val_loader, test_loader
+

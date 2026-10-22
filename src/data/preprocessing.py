@@ -8,6 +8,7 @@ preprocessing for the QA pipeline.
 import re
 from typing import List, Optional, Tuple
 
+import torch
 from transformers import AutoTokenizer
 
 
@@ -91,6 +92,58 @@ class BiomedicalPreprocessor:
 
         return encoded
 
+    def tokenize_multi_choice(
+        self,
+        question: str,
+        options: List[str],
+        max_length: Optional[int] = None,
+        return_tensors: str = "pt",
+    ) -> dict:
+        """
+        Tokenize a question with multiple choice options.
+
+        Creates separate tokenized pairs for each option:
+        [CLS] question [SEP] option_i [SEP]
+
+        Args:
+            question: The biomedical question.
+            options: List of option strings (e.g., ["Aspirin", "Metformin", ...]).
+            max_length: Maximum sequence length per option pair.
+            return_tensors: Return format.
+
+        Returns:
+            Dict with input_ids [num_options, seq_len],
+            attention_mask [num_options, seq_len].
+        """
+        question = self.preprocess_text(question)
+
+        if max_length is None:
+            max_length = min(
+                self.max_question_length + self.max_context_length,
+                self.tokenizer.model_max_length,
+            )
+
+        all_input_ids = []
+        all_attention_masks = []
+
+        for option in options:
+            option = self.preprocess_text(option)
+            encoded = self.tokenizer(
+                question,
+                option,
+                max_length=max_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors=return_tensors,
+            )
+            all_input_ids.append(encoded["input_ids"])
+            all_attention_masks.append(encoded["attention_mask"])
+
+        return {
+            "input_ids": torch.cat(all_input_ids, dim=0),
+            "attention_mask": torch.cat(all_attention_masks, dim=0),
+        }
+
     def encode_label(self, label: str) -> int:
         """Convert label string to integer ID."""
         if not label or label not in self.label2id:
@@ -100,6 +153,21 @@ class BiomedicalPreprocessor:
     def decode_label(self, label_id: int) -> str:
         """Convert label ID back to string."""
         return self.id2label.get(label_id, "Unknown")
+
+    def encode_multi_choice_label(self, answer_idx) -> int:
+        """Convert multi-choice answer index to integer label.
+
+        Args:
+            answer_idx: Integer index (0-based) or letter key ('A', 'B', etc.).
+
+        Returns:
+            Integer label (0-based index).
+        """
+        if isinstance(answer_idx, int):
+            return answer_idx
+        if isinstance(answer_idx, str) and len(answer_idx) == 1 and answer_idx.isalpha():
+            return ord(answer_idx.upper()) - ord("A")
+        return -1
 
     def batch_tokenize(
         self,
