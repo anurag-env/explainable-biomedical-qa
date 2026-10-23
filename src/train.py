@@ -24,6 +24,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 import yaml
 
 from src.models.rerb_qa import RERBQAModel
@@ -97,7 +98,8 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device, epoch,
     num_batches = 0
     optimizer.zero_grad()
 
-    for step, batch in enumerate(dataloader):
+    pbar = tqdm(dataloader, desc=f"  Epoch {epoch}", leave=True)
+    for step, batch in enumerate(pbar):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
@@ -117,8 +119,12 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device, epoch,
         total_loss += output["loss"].item()
         num_batches += 1
 
-        if step % 100 == 0:
-            print(f"  Epoch {epoch} | Step {step} | Loss: {output['loss'].item():.4f}")
+        curr_avg = total_loss / num_batches
+        pbar.set_postfix({
+            "loss": f"{output['loss'].item():.4f}",
+            "avg_loss": f"{curr_avg:.4f}",
+            "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+        })
 
         if writer:
             global_step = epoch * len(dataloader) + step
@@ -140,7 +146,8 @@ def evaluate(model, dataloader, device, task_type="classification", use_bf16=Fal
     all_preds = []
     all_labels = []
 
-    for batch in dataloader:
+    pbar = tqdm(dataloader, desc="  Evaluating", leave=False)
+    for batch in pbar:
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
