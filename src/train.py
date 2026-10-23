@@ -90,7 +90,7 @@ def get_scheduler(optimizer, name, num_training_steps, warmup_ratio=0.1):
 
 def train_one_epoch(model, dataloader, optimizer, scheduler, device, epoch,
                     writer=None, grad_accum_steps=4, max_grad_norm=1.0,
-                    task_type="classification"):
+                    task_type="classification", use_bf16=False):
     """Train for one epoch."""
     model.train()
     total_loss = 0
@@ -102,8 +102,10 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device, epoch,
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
 
-        output = model(input_ids, attention_mask, labels=labels, task_type=task_type)
-        loss = output["loss"] / grad_accum_steps
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
+            output = model(input_ids, attention_mask, labels=labels, task_type=task_type)
+            loss = output["loss"] / grad_accum_steps
+
         loss.backward()
 
         if (step + 1) % grad_accum_steps == 0:
@@ -128,7 +130,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device, epoch,
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, device, task_type="classification"):
+def evaluate(model, dataloader, device, task_type="classification", use_bf16=False):
     """Evaluate model on a dataset."""
     model.eval()
     total_loss = 0
@@ -143,7 +145,8 @@ def evaluate(model, dataloader, device, task_type="classification"):
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
 
-        output = model(input_ids, attention_mask, labels=labels, task_type=task_type)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
+            output = model(input_ids, attention_mask, labels=labels, task_type=task_type)
 
         if "loss" in output:
             total_loss += output["loss"].item()
@@ -271,6 +274,16 @@ def train_stage(stage, configs, model=None, resume_from=None, device="cuda"):
     ckpt_dir = Path(train_cfg["checkpoint_dir"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    # Check BF16 capability (e.g. NVIDIA A100 / Ampere+)
+    use_bf16 = (
+        device.startswith("cuda")
+        and general_cfg.get("bf16", False)
+        and torch.cuda.is_available()
+        and torch.cuda.is_bf16_supported()
+    )
+    if use_bf16:
+        print("  -> Accelerated with Native BFloat16 Mixed Precision on CUDA (A100 Tensor Cores)")
+
     # Training loop
     best_accuracy = 0.0
     patience_counter = 0
@@ -283,9 +296,10 @@ def train_stage(stage, configs, model=None, resume_from=None, device="cuda"):
             grad_accum_steps=general_cfg.get("gradient_accumulation_steps", 4),
             max_grad_norm=general_cfg.get("max_grad_norm", 1.0),
             task_type=task_type,
+            use_bf16=use_bf16,
         )
 
-        val_metrics = evaluate(model, val_loader, device, task_type=task_type)
+        val_metrics = evaluate(model, val_loader, device, task_type=task_type, use_bf16=use_bf16)
 
         print(f"\nEpoch {epoch}/{train_cfg['epochs']}")
         print(f"  Train Loss: {train_loss:.4f}")
@@ -315,7 +329,7 @@ def train_stage(stage, configs, model=None, resume_from=None, device="cuda"):
 
     # Final evaluation on test set
     model.load_state_dict(torch.load(ckpt_dir / "best.pt", map_location=device))
-    test_metrics = evaluate(model, test_loader, device, task_type=task_type)
+    test_metrics = evaluate(model, test_loader, device, task_type=task_type, use_bf16=use_bf16)
     print(f"\nTest Results (Stage {stage}):")
     for k, v in test_metrics.items():
         print(f"  {k}: {v:.4f}")
