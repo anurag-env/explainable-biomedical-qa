@@ -145,7 +145,9 @@ class RERBQAModel(nn.Module):
         E_0 = encoder_output["last_hidden_state"]  # [batch, seq_len, hidden]
 
         # Step 2: Recursive Refinement — E* = refine(E0)
-        refinement_output = self.recursive_refinement(E_0, attention_mask)
+        refinement_output = self.recursive_refinement(
+            E_0, attention_mask, return_attention_weights=return_explanations
+        )
         E_star = refinement_output["refined_embedding"]  # [batch, seq_len, hidden]
 
         # Pool: take CLS token representation
@@ -233,7 +235,9 @@ class RERBQAModel(nn.Module):
         E_0 = encoder_output["last_hidden_state"]
 
         # Step 2: Recursive Refinement
-        refinement_output = self.recursive_refinement(E_0, flat_mask)
+        refinement_output = self.recursive_refinement(
+            E_0, flat_mask, return_attention_weights=return_explanations
+        )
         E_star = refinement_output["refined_embedding"]
 
         # Pool: CLS token representation

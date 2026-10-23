@@ -42,15 +42,19 @@ class RecursiveEmbeddingRefinement(nn.Module):
         self.layer_norm = nn.LayerNorm(hidden_size)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, E_0, attention_mask=None, return_all_iterations=False):
+    def forward(self, E_0, attention_mask=None, return_all_iterations=False,
+                return_attention_weights=False):
         E_t = E_0
         convergence_norms = []
         all_embeddings = [E_0] if return_all_iterations else []
         attention_weights = None
 
         for t in range(self.max_iterations):
-            attn_out, attn_w = self.attention(E_t, attention_mask, return_attention_weights=True)
-            attention_weights = attn_w
+            attn_out, attn_w = self.attention(
+                E_t, attention_mask, return_attention_weights=return_attention_weights
+            )
+            if return_attention_weights:
+                attention_weights = attn_w
             gru_out, _ = self.gru(E_t)
 
             gate = self.fusion_gate(torch.cat([attn_out, gru_out], dim=-1))

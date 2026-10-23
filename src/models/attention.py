@@ -95,22 +95,30 @@ class MultiHeadSelfAttention(nn.Module):
         K = K.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         V = V.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # Scaled dot-product attention: Softmax(QK^T / sqrt(d_k)) V
-        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
-        # attn_scores: [batch, num_heads, seq_len, seq_len]
+        # Scaled dot-product attention
+        # When attention weights are not needed (training), use FlashAttention (scaled_dot_product_attention)
+        # for O(1) memory and massive speedup on NVIDIA A100 Tensor Cores.
+        if not return_attention_weights and hasattr(F, "scaled_dot_product_attention"):
+            if attention_mask is not None:
+                # In PyTorch SDPA, bool mask: True = attend, False = ignore
+                mask = attention_mask.unsqueeze(1).unsqueeze(2).bool()
+            else:
+                mask = None
 
-        # Apply attention mask (if provided)
-        if attention_mask is not None:
-            # Expand mask: [batch, 1, 1, seq_len]
-            mask = attention_mask.unsqueeze(1).unsqueeze(2)
-            attn_scores = attn_scores.masked_fill(mask == 0, float("-inf"))
+            dropout_p = self.attn_dropout.p if self.training else 0.0
+            attn_output = F.scaled_dot_product_attention(
+                Q, K, V, attn_mask=mask, dropout_p=dropout_p
+            )
+            attn_weights = None
+        else:
+            attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
+            if attention_mask is not None:
+                mask = attention_mask.unsqueeze(1).unsqueeze(2)
+                attn_scores = attn_scores.masked_fill(mask == 0, float("-inf"))
 
-        attn_weights = F.softmax(attn_scores, dim=-1)
-        attn_weights = self.attn_dropout(attn_weights)
-
-        # Apply attention to values
-        attn_output = torch.matmul(attn_weights, V)
-        # attn_output: [batch, num_heads, seq_len, head_dim]
+            attn_weights = F.softmax(attn_scores, dim=-1)
+            attn_weights = self.attn_dropout(attn_weights)
+            attn_output = torch.matmul(attn_weights, V)
 
         # Reshape back: [batch, seq_len, hidden_size]
         attn_output = attn_output.transpose(1, 2).contiguous().view(
