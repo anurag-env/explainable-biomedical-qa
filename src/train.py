@@ -43,28 +43,48 @@ def load_config(config_dir="configs"):
     return configs
 
 
-def get_optimizer(model, name, lr, weight_decay):
-    """Create optimizer by name."""
+def get_optimizer(model, name, lr, weight_decay, task_type="classification", head_lr_mult=5.0):
+    """Create optimizer with differential learning rates for newly initialized heads."""
     lr = float(lr)
     weight_decay = float(weight_decay)
+
+    head_params = []
+    base_params = []
+    head_keywords = ["mc_scorer", "classifier", "confidence_head"]
+
+    for name_p, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if any(kw in name_p for kw in head_keywords):
+            head_params.append(param)
+        else:
+            base_params.append(param)
+
+    param_groups = [
+        {"params": base_params, "lr": lr, "weight_decay": weight_decay},
+        {"params": head_params, "lr": lr * head_lr_mult, "weight_decay": weight_decay * 0.5},
+    ]
+
+    print(f"  -> Optimizer parameter groups: Base LR={lr:.2e} ({len(base_params)} tensors), Head LR={lr * head_lr_mult:.2e} ({len(head_params)} tensors)")
+
     if name == "adamw":
-        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        return torch.optim.AdamW(param_groups)
     elif name == "lion":
         try:
             from lion_pytorch import Lion
-            return Lion(model.parameters(), lr=lr, weight_decay=weight_decay)
+            return Lion(param_groups)
         except ImportError:
             print("Lion not available, falling back to AdamW")
-            return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+            return torch.optim.AdamW(param_groups)
     elif name == "ranger":
         try:
             from ranger21 import Ranger21
-            return Ranger21(model.parameters(), lr=lr, weight_decay=weight_decay, num_epochs=10, num_batches_per_epoch=100)
+            return Ranger21(param_groups, num_epochs=10, num_batches_per_epoch=100)
         except ImportError:
             print("Ranger not available, falling back to AdamW")
-            return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+            return torch.optim.AdamW(param_groups)
     else:
-        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        return torch.optim.AdamW(param_groups)
 
 
 def get_scheduler(optimizer, name, num_training_steps, warmup_ratio=0.1):
@@ -103,9 +123,12 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device, epoch,
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
+        num_opts = batch.get("num_options")
+        if num_opts is not None:
+            num_opts = num_opts.to(device)
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
-            output = model(input_ids, attention_mask, labels=labels, task_type=task_type)
+            output = model(input_ids, attention_mask, labels=labels, task_type=task_type, num_options=num_opts)
             loss = output["loss"] / grad_accum_steps
 
         loss.backward()
@@ -151,9 +174,12 @@ def evaluate(model, dataloader, device, task_type="classification", use_bf16=Fal
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
+        num_opts = batch.get("num_options")
+        if num_opts is not None:
+            num_opts = num_opts.to(device)
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
-            output = model(input_ids, attention_mask, labels=labels, task_type=task_type)
+            output = model(input_ids, attention_mask, labels=labels, task_type=task_type, num_options=num_opts)
 
         if "loss" in output:
             total_loss += output["loss"].item()
@@ -238,7 +264,7 @@ def train_stage(stage, configs, model=None, resume_from=None, device="cuda"):
     # Create dataloaders
     data_path = ds_cfg["processed_dir"] if os.path.exists(ds_cfg["processed_dir"]) else ds_cfg["raw_dir"]
     if task_type == "multi_choice":
-        max_options = configs["model"].get("multi_choice", {}).get("max_options", 5)
+        max_options = configs["model"].get("multi_choice", {}).get("max_options", 4)
         train_loader, val_loader, test_loader = create_multi_choice_dataloaders(
             data_path=data_path,
             batch_size=train_cfg["batch_size"],
@@ -262,10 +288,13 @@ def train_stage(stage, configs, model=None, resume_from=None, device="cuda"):
             seed=general_cfg.get("seed", 42),
         )
 
-    # Setup training
+    # Setup training with differential learning rate for multi-choice head
+    head_mult = 5.0 if task_type == "multi_choice" else 1.0
     optimizer = get_optimizer(
         model, general_cfg.get("optimizer", "adamw"),
         train_cfg["learning_rate"], general_cfg.get("weight_decay", 0.01),
+        task_type=task_type,
+        head_lr_mult=head_mult,
     )
     total_steps = len(train_loader) * train_cfg["epochs"]
     scheduler = get_scheduler(

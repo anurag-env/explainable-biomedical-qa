@@ -307,7 +307,7 @@ class MultiChoiceQADataset(Dataset):
         preprocessor: Optional[BiomedicalPreprocessor] = None,
         max_length: int = 512,
         tokenizer_name: str = "allenai/biomed_roberta_base",
-        max_options: int = 5,
+        max_options: int = 4,
     ):
         """
         Args:
@@ -492,7 +492,7 @@ def create_multi_choice_dataloaders(
     batch_size: int = 16,
     max_length: int = 512,
     tokenizer_name: str = "allenai/biomed_roberta_base",
-    max_options: int = 5,
+    max_options: int = 4,
     train_ratio: float = 0.8,
     val_ratio: float = 0.1,
     test_ratio: float = 0.1,

@@ -61,9 +61,9 @@ classifier:
   activation: "gelu"
 
 multi_choice:
-  max_options: 5       # Maximum number of options (MedQA uses 4)
+  max_options: 4       # Maximum number of options (MedQA uses 4: A, B, C, D)
   scorer_hidden: 384   # Hidden dimension for the option scoring head
-  dropout: 0.3
+  dropout: 0.15        # Sharper differential ranking
 
 translation:
   primary_model: "ai4bharat/indictrans2-en-indic-1B"
