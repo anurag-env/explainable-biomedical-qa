@@ -47,3 +47,7 @@ data/processed/
 # Chat notes and conversation logs
 chat1.md
 chat*.md
+
+# Large archives and local training logs
+*.tar.gz
+*.log
