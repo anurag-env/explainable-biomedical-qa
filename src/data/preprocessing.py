@@ -133,7 +133,10 @@ class BiomedicalPreprocessor:
                 option,
                 max_length=max_length,
                 padding="max_length",
-                truncation=True,
+                # A clinical vignette can be long, but the candidate answer must
+                # never disappear.  ``True`` uses ``longest_first`` and may trim
+                # either side of a pair; only trim the question side instead.
+                truncation="only_first",
                 return_tensors=return_tensors,
             )
             all_input_ids.append(encoded["input_ids"])

@@ -115,7 +115,8 @@ class RERBQAModel(nn.Module):
 
     def forward(self, input_ids, attention_mask, token_type_ids=None,
                 labels=None, graph_data=None, return_explanations=False,
-                task_type="classification", num_options=None):
+                task_type="classification", num_options=None,
+                label_smoothing=None, calibration_weight=0.1):
         """
         Full forward pass.
 
@@ -138,6 +139,8 @@ class RERBQAModel(nn.Module):
                 input_ids, attention_mask, labels=labels,
                 return_explanations=return_explanations,
                 valid_num_options=num_options,
+                label_smoothing=0.05 if label_smoothing is None else label_smoothing,
+                calibration_weight=calibration_weight,
             )
 
         # Step 1: Encode — E0 = RoBERTa(Q, A)
@@ -209,7 +212,8 @@ class RERBQAModel(nn.Module):
         return result
 
     def _forward_multi_choice(self, input_ids, attention_mask, labels=None,
-                               return_explanations=False, valid_num_options=None):
+                               return_explanations=False, valid_num_options=None,
+                               label_smoothing=0.05, calibration_weight=0.1):
         """
         Multi-choice forward pass. Scores each option independently
         and selects the best diagnosis from the available options.
@@ -245,16 +249,24 @@ class RERBQAModel(nn.Module):
 
         # Step 3: Score each option via the multi-choice head
         scores = self.mc_scorer(cls_repr).squeeze(-1)  # [B*N]
-        logits = scores.view(batch_size, num_options)   # [B, N]
+        unmasked_logits = scores.view(batch_size, num_options)   # [B, N]
+        logits = unmasked_logits
 
         # Step 3.1: Mask out padded/invalid options with -1e9 so they are never chosen
         if valid_num_options is not None:
             opt_range = torch.arange(num_options, device=logits.device).unsqueeze(0)
             valid_opts = opt_range < valid_num_options.unsqueeze(1)
             logits = logits.masked_fill(~valid_opts, -1e9)
+        else:
+            valid_opts = torch.ones_like(logits, dtype=torch.bool)
 
         result = {
             "logits": logits,
+            # Kept for training diagnostics and regression tests.  Consumers
+            # should use ``logits`` for probabilities and loss.
+            "unmasked_logits": unmasked_logits,
+            "valid_options_mask": valid_opts,
+            "option_logit_variance": unmasked_logits.var(dim=-1, unbiased=False),
             "convergence_norms": refinement_output["convergence_norms"],
             "num_iterations": refinement_output["num_iterations"],
         }
@@ -279,9 +291,9 @@ class RERBQAModel(nn.Module):
         if labels is not None:
             valid_mask = labels >= 0
             if valid_mask.sum() > 0:
-                loss = F.cross_entropy(logits[valid_mask], labels[valid_mask], label_smoothing=0.05)
-                if self.use_confidence:
-                    loss += 0.1 * self.confidence_head.calibration_loss(
+                loss = F.cross_entropy(logits[valid_mask], labels[valid_mask], label_smoothing=label_smoothing)
+                if self.use_confidence and calibration_weight:
+                    loss += calibration_weight * self.confidence_head.calibration_loss(
                         logits[valid_mask], labels[valid_mask]
                     )
                 result["loss"] = loss

@@ -19,6 +19,7 @@ import os
 import sys
 import json
 import time
+import math
 from pathlib import Path
 
 import torch
@@ -133,7 +134,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device, epoch,
 
         loss.backward()
 
-        if (step + 1) % grad_accum_steps == 0:
+        if (step + 1) % grad_accum_steps == 0 or (step + 1) == len(dataloader):
             nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
             scheduler.step()
@@ -296,7 +297,10 @@ def train_stage(stage, configs, model=None, resume_from=None, device="cuda"):
         task_type=task_type,
         head_lr_mult=head_mult,
     )
-    total_steps = len(train_loader) * train_cfg["epochs"]
+    # The scheduler advances on optimizer updates, not on microbatches.  Using
+    # the latter stretches warmup by ``gradient_accumulation_steps`` and leaves
+    # most of the planned schedule unused.
+    total_steps = math.ceil(len(train_loader) / general_cfg.get("gradient_accumulation_steps", 4)) * train_cfg["epochs"]
     scheduler = get_scheduler(
         optimizer, general_cfg.get("scheduler", "cosine"),
         total_steps, train_cfg.get("warmup_ratio", 0.1),

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
-from torch.utils.data import DataLoader, Dataset, ConcatDataset, random_split
+from torch.utils.data import DataLoader, Dataset, ConcatDataset, random_split, Subset
 from transformers import AutoTokenizer
 
 from .preprocessing import BiomedicalPreprocessor
@@ -372,6 +372,7 @@ class MultiChoiceQADataset(Dataset):
                     continue
                 try:
                     record = json.loads(line)
+                    option_keys = None
 
                     # Extract options
                     options = record.get("options")
@@ -381,7 +382,12 @@ class MultiChoiceQADataset(Dataset):
                             record.get("context", "")
                         )
                     elif isinstance(options, dict):
-                        options = list(options.values())
+                        # Preserve the answer-key order, rather than relying on
+                        # arbitrary mapping insertion order.
+                        option_keys = sorted(options.keys())
+                        options = [options[key] for key in option_keys]
+                    else:
+                        option_keys = None
 
                     if len(options) < 2:
                         continue  # Need at least 2 options
@@ -394,9 +400,14 @@ class MultiChoiceQADataset(Dataset):
                             options, answer_text, record.get("options")
                         )
                     elif isinstance(answer_idx, str):
-                        answer_idx = ord(answer_idx.upper()) - ord("A")
+                        if option_keys is not None and answer_idx in option_keys:
+                            answer_idx = option_keys.index(answer_idx)
+                        else:
+                            answer_idx = self.preprocessor.encode_multi_choice_label(answer_idx)
 
-                    if answer_idx is None or answer_idx < 0 or answer_idx >= len(options):
+                    if (answer_idx is None or answer_idx < 0
+                            or answer_idx >= len(options)
+                            or answer_idx >= self.max_options):
                         continue  # Skip records without valid answer index
 
                     records.append({
@@ -492,6 +503,7 @@ def create_multi_choice_dataloaders(
     batch_size: int = 16,
     max_length: int = 512,
     tokenizer_name: str = "allenai/biomed_roberta_base",
+    preprocessor: Optional[BiomedicalPreprocessor] = None,
     max_options: int = 4,
     train_ratio: float = 0.8,
     val_ratio: float = 0.1,
@@ -520,11 +532,12 @@ def create_multi_choice_dataloaders(
     assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, \
         "Split ratios must sum to 1.0"
 
-    preprocessor = BiomedicalPreprocessor(
-        tokenizer_name=tokenizer_name,
-        max_question_length=max_length,
-        max_context_length=max_length,
-    )
+    if preprocessor is None:
+        preprocessor = BiomedicalPreprocessor(
+            tokenizer_name=tokenizer_name,
+            max_question_length=max_length,
+            max_context_length=max_length,
+        )
 
     dataset = MultiChoiceQADataset(
         data_path=data_path,
@@ -533,16 +546,25 @@ def create_multi_choice_dataloaders(
         max_options=max_options,
     )
 
-    # Split dataset
-    total = len(dataset)
-    train_size = int(total * train_ratio)
-    val_size = int(total * val_ratio)
-    test_size = total - train_size - val_size
-
+    # Split groups of identical questions, not individual rows.  This prevents
+    # duplicate questions from leaking between train, validation, and test.
+    groups = {}
+    for index, record in enumerate(dataset.records):
+        groups.setdefault(record["question"], []).append(index)
+    group_items = list(groups.values())
     generator = torch.Generator().manual_seed(seed)
-    train_dataset, val_dataset, test_dataset = random_split(
-        dataset, [train_size, val_size, test_size], generator=generator
-    )
+    order = torch.randperm(len(group_items), generator=generator).tolist()
+    ordered_groups = [group_items[index] for index in order]
+    total = len(dataset)
+    train_target = int(total * train_ratio)
+    val_target = int(total * val_ratio)
+    split_indices = ([], [], [])
+    for group in ordered_groups:
+        # Fill train then validation to their targets; the remainder is test.
+        target = 0 if len(split_indices[0]) < train_target else (1 if len(split_indices[1]) < val_target else 2)
+        split_indices[target].extend(group)
+    train_dataset, val_dataset, test_dataset = (Subset(dataset, indices) for indices in split_indices)
+    train_size, val_size, test_size = map(len, split_indices)
 
     # Create DataLoaders
     train_loader = DataLoader(
@@ -573,4 +595,3 @@ def create_multi_choice_dataloaders(
     print(f"Multi-choice dataset splits: train={train_size}, val={val_size}, test={test_size}")
     print(f"Options per question: max={max_options}")
     return train_loader, val_loader, test_loader
-
