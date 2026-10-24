@@ -244,11 +244,24 @@ class RERBQAModel(nn.Module):
         )
         E_star = refinement_output["refined_embedding"]
 
-        # Pool: CLS token representation
-        cls_repr = E_star[:, 0, :]  # [B*N, hidden]
+        # Pool only the answer-option tokens, rather than the nearly identical
+        # CLS tokens of four copies of the same question.  RoBERTa encodes a
+        # pair as ``<s> question </s></s> option </s>``.  The tokens after the
+        # second separator and before the third are the candidate answer.
+        sep_id = self.encoder.config.eos_token_id
+        sep_count = flat_ids.eq(sep_id).cumsum(dim=1)
+        option_token_mask = (
+            (sep_count == 2)
+            & flat_ids.ne(sep_id)
+            & flat_mask.bool()
+        )
+        option_repr = (
+            (E_star * option_token_mask.unsqueeze(-1)).sum(dim=1)
+            / option_token_mask.sum(dim=1, keepdim=True).clamp_min(1)
+        )  # [B*N, hidden]
 
-        # Step 3: Score each option via the multi-choice head
-        scores = self.mc_scorer(cls_repr).squeeze(-1)  # [B*N]
+        # Step 3: Score each contextualized option representation.
+        scores = self.mc_scorer(option_repr).squeeze(-1)  # [B*N]
         unmasked_logits = scores.view(batch_size, num_options)   # [B, N]
         logits = unmasked_logits
 
@@ -273,7 +286,7 @@ class RERBQAModel(nn.Module):
 
         # Step 4: Confidence calibration on the selected option
         if self.use_confidence:
-            cls_reshaped = cls_repr.view(batch_size, num_options, -1)
+            cls_reshaped = option_repr.view(batch_size, num_options, -1)
             best_idx = logits.argmax(dim=-1)
             best_cls = cls_reshaped[
                 torch.arange(batch_size, device=logits.device), best_idx

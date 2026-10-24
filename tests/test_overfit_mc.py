@@ -5,6 +5,7 @@ deterministic stand-ins so they can run in CI as well as on a GPU host.
 """
 
 import json
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -24,8 +25,12 @@ class _Preprocessor:
 
 
 class _Encoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(eos_token_id=2)
+
     def forward(self, input_ids, attention_mask):
-        values = input_ids[:, :1].float().unsqueeze(-1)
+        values = input_ids.float().unsqueeze(-1)
         return {"last_hidden_state": values.expand(-1, input_ids.size(1), 2)}
 
 
@@ -40,7 +45,9 @@ def _tiny_mc_model():
     model.encoder = _Encoder()
     model.recursive_refinement = _Refinement()
     model.mc_scorer = nn.Linear(2, 1, bias=False)
-    model.mc_scorer.weight.data.fill_(1.0)
+    # Start neutral so the overfit check verifies learning rather than a
+    # hand-initialized correct ranking.
+    model.mc_scorer.weight.data.zero_()
     model.use_confidence = False
     return model
 
@@ -74,15 +81,18 @@ def test_mc_label_alignment_and_question_group_split(tmp_path):
 
 def test_mask_is_valid_and_logits_vary_across_options():
     model = _tiny_mc_model()
-    ids = torch.tensor([[[1, 9], [2, 9], [3, 9], [4, 9]]])
+    ids = torch.tensor([[
+        [0, 2, 2, 11, 2], [0, 2, 2, 12, 2],
+        [0, 2, 2, 13, 2], [0, 2, 2, 14, 2],
+    ]])
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
     output = model._forward_multi_choice(
-        ids, ids.ne(0).long(), labels=torch.tensor([3]),
+        ids, torch.ones_like(ids), labels=torch.tensor([3]),
         valid_num_options=torch.tensor([4]), label_smoothing=0.0,
     )
     output["loss"].backward()
     optimizer.step()
-    output = model._forward_multi_choice(ids, ids.ne(0).long(), valid_num_options=torch.tensor([4]))
+    output = model._forward_multi_choice(ids, torch.ones_like(ids), valid_num_options=torch.tensor([4]))
     assert output["valid_options_mask"].tolist() == [[True, True, True, True]]
     assert output["option_logit_variance"].item() > 0
 
@@ -94,9 +104,13 @@ def test_fixed_64_example_mc_overfits_without_smoothing_or_calibration():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
     labels = torch.arange(64) % 4
     # Each correct candidate has a learnable positive cue; label positions vary.
-    ids = torch.ones(64, 4, 2, dtype=torch.long)
-    ids[torch.arange(64), labels, 0] = 2
-    mask = ids.ne(0).long()
+    ids = torch.zeros(64, 4, 5, dtype=torch.long)
+    ids[:, :, 1] = 2
+    ids[:, :, 2] = 2
+    ids[:, :, 3] = 10
+    ids[:, :, 4] = 2
+    ids[torch.arange(64), labels, 3] = 20
+    mask = torch.ones_like(ids)
     initial = None
     history = []
     for step in range(300):
